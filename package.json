@@ -1,0 +1,20 @@
+{
+  "name": "invent-ory",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Camera-based visible-shelf inventory counting system (Phase 1: infra, API, ledger, review console with synthetic observations)",
+  "workspaces": [
+    "infra",
+    "api",
+    "web",
+    "worker"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "synth": "npm run synth --workspace infra"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

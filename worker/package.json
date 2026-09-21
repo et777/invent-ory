@@ -1,0 +1,10 @@
+{
+  "name": "@invent-ory/worker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Placeholder for the Phase 5 async recognition worker (ECS/GPU consumer of the SQS recognition queue). Not implemented in Phase 1 — worker desired count is 0 and on-device/API matching is used instead.",
+  "scripts": {
+    "build": "echo 'worker not yet implemented (Phase 5)' && exit 0",
+    "test": "echo 'worker not yet implemented (Phase 5)' && exit 0"
+  }
+}

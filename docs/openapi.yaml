@@ -1,0 +1,325 @@
+openapi: 3.0.3
+info:
+  title: Invent-ory Visual Inventory API
+  version: 0.1.0
+  description: >
+    Authenticated API for camera-based visible-shelf inventory counting.
+    A scan is an observation of visible shelf facings, not a full
+    stock-on-hand figure. All endpoints require a Cognito-issued JWT;
+    orgId/siteId claims are enforced server-side and are never accepted
+    from the request body or query string.
+servers:
+  - url: https://{apiId}.execute-api.{region}.amazonaws.com
+    variables:
+      apiId:
+        default: unknown
+      region:
+        default: ca-central-1
+security:
+  - cognitoJwt: []
+components:
+  securitySchemes:
+    cognitoJwt:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    BatchItemStatus:
+      type: object
+      properties:
+        clientRequestId: { type: string }
+        status: { type: string, enum: [accepted, duplicate, rejected] }
+        reason: { type: string }
+    Product:
+      type: object
+      required: [sku, name]
+      properties:
+        sku: { type: string }
+        name: { type: string }
+        barcode: { type: string }
+        category: { type: string }
+        catalogVersion: { type: integer }
+        active: { type: boolean }
+    Session:
+      type: object
+      required: [siteId, zone, deviceId, operatorId]
+      properties:
+        sessionId: { type: string }
+        siteId: { type: string }
+        zone: { type: string }
+        shelf: { type: string }
+        deviceId: { type: string }
+        operatorId: { type: string }
+        catalogVersion: { type: integer }
+        modelVersion: { type: string }
+        state: { type: string, enum: [ACTIVE, REVIEW, FINAL] }
+        startedAt: { type: string, format: date-time }
+        endedAt: { type: string, format: date-time }
+    Observation:
+      type: object
+      required: [objectId, revision]
+      properties:
+        objectId:
+          type: string
+          description: Opaque, client-generated, stable within one session. Never a filename or frame number.
+        revision: { type: integer }
+        trackIds:
+          type: array
+          items: { type: string }
+        shelfPosition: { type: object }
+        candidateSkus:
+          type: array
+          items:
+            type: object
+            properties:
+              sku: { type: string }
+              score: { type: number }
+        evidenceKeys:
+          type: array
+          items: { type: string }
+        state:
+          type: string
+          enum: [PROVISIONAL, CONFIRMED, UNKNOWN, REVIEW_REQUIRED]
+        clientRequestId: { type: string }
+    CountEvent:
+      type: object
+      required: [eventId, objectId, type, actor]
+      properties:
+        eventId:
+          type: string
+          description: Globally unique per session. Conditional-put enforced; retries return "duplicate", never double-applied.
+        objectId: { type: string }
+        type: { type: string, enum: [CONFIRM, REVERSE, REASSIGN, MANUAL_ADJUST] }
+        sku: { type: string }
+        quantityDelta: { type: integer }
+        actor: { type: string }
+        reason:
+          type: string
+          description: Required for REVERSE, REASSIGN, MANUAL_ADJUST.
+        evidence:
+          type: array
+          items: { type: string }
+        timestamp: { type: string, format: date-time }
+        clientRequestId: { type: string }
+    ReviewTask:
+      type: object
+      properties:
+        taskId: { type: string }
+        objectId: { type: string }
+        reason: { type: string }
+        status: { type: string, enum: [OPEN, RESOLVED, DISMISSED] }
+        reviewerDecision: { type: object }
+    SessionSummary:
+      type: object
+      description: A projection derived by replaying CountEvents. Never a separately-mutated counter.
+      properties:
+        sessionId: { type: string }
+        bySku:
+          type: array
+          items:
+            type: object
+            properties:
+              sku: { type: string }
+              visibleCount: { type: integer }
+        unknownCount: { type: integer }
+        coverageStatus: { type: string }
+        generatedAt: { type: string, format: date-time }
+paths:
+  /catalog/import:
+    post:
+      summary: Import catalog CSV rows (sku,name,barcode,category)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                rows:
+                  type: array
+                  items: { $ref: '#/components/schemas/Product' }
+      responses:
+        '200':
+          description: Per-row accepted/duplicate/rejected status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  catalogVersion: { type: integer }
+                  results:
+                    type: array
+                    items: { $ref: '#/components/schemas/BatchItemStatus' }
+  /catalog/products:
+    get:
+      summary: List products for the caller's org
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/Product' }
+  /sessions:
+    post:
+      summary: Start a scan session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Session' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Session' }
+  /sessions/{id}:
+    get:
+      summary: Fetch a session (org-scoped; 404 if not owned by caller)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Session' }
+        '404': { description: Not found or not owned by caller's org }
+  /sessions/{id}/observations:batch:
+    post:
+      summary: Upsert observations with optimistic revision checks
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                deviceId: { type: string }
+                clientRequestId: { type: string }
+                observations:
+                  type: array
+                  items: { $ref: '#/components/schemas/Observation' }
+      responses:
+        '200':
+          description: Per-item accepted/duplicate/rejected status (stale revision -> rejected)
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/BatchItemStatus' }
+  /sessions/{id}/events:batch:
+    post:
+      summary: Idempotent count-event ledger write
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                deviceId: { type: string }
+                clientRequestId: { type: string }
+                events:
+                  type: array
+                  items: { $ref: '#/components/schemas/CountEvent' }
+      responses:
+        '200':
+          description: Per-item accepted/duplicate/rejected status
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/BatchItemStatus' }
+  /sessions/{id}/evidence-upload-url:
+    post:
+      summary: Presigned S3 PUT URL scoped to orgId/sessionId
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                contentType: { type: string, enum: [image/jpeg, image/png, video/mp4] }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  uploadUrl: { type: string }
+                  key: { type: string }
+                  expiresIn: { type: integer }
+  /sessions/{id}/summary:
+    get:
+      summary: Visible-shelf count projection (never "stock on hand")
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SessionSummary' }
+  /sessions/{id}/review-tasks:
+    get:
+      summary: List review tasks for the session
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ReviewTask' }
+  /sessions/{id}/review-decisions:
+    post:
+      summary: Apply a reviewer decision (itself emits an idempotent CountEvent)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [taskId, decision, actor]
+              properties:
+                taskId: { type: string }
+                decision: { type: string, enum: [REASSIGN, MANUAL_ADJUST, DISMISS] }
+                sku: { type: string }
+                quantityDelta: { type: integer }
+                reason: { type: string }
+                actor: { type: string }
+      responses:
+        '200': { description: OK }
+  /sessions/{id}/finalize:
+    post:
+      summary: Mark a session FINAL (only if zero open review tasks)
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '200': { description: Finalized }
+        '409': { description: Open review tasks remain }
+  /sessions/{id}/export:
+    get:
+      summary: CSV/JSON export - visibleCount/unknownCount/coverageStatus, never stockOnHand
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+        - { name: format, in: query, schema: { type: string, enum: [csv, json] } }
+      responses:
+        '200':
+          description: OK
